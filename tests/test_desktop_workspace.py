@@ -20,12 +20,17 @@ def workspace(tmp_path, monkeypatch):
     window.close(); qt.processEvents(); pixelqso.DATA = old_data
 
 def test_navigation_stays_in_sync_with_existing_page_actions(workspace):
+    assert not workspace.workspace_title.isVisible()
     workspace.workspace_navigation.button(1).click()
     assert workspace.tabs.currentIndex() == 1
+    assert workspace.workspace_title.isVisible()
     assert workspace.workspace_title.text() == 'A world in little squares.'
     workspace.tabs.setCurrentIndex(2)
     assert workspace.workspace_navigation.checkedId() == 2
     assert not workspace.tabs.tabBar().isVisible()
+    workspace.workspace_navigation.button(0).click()
+    assert not workspace.workspace_title.isVisible()
+    assert workspace.listen_indicator.isVisible()
 
 def test_stage_and_card_selection_never_transmit_and_refresh_preserves_stage(workspace):
     assert workspace._outgoing_message_type() == 'exchange'
@@ -98,6 +103,7 @@ def test_resizable_columns_keep_stages_visible_and_remember_sizes(workspace):
     qt = QApplication.instance()
     splitter = workspace.operate_splitter
     assert not splitter.childrenCollapsible()
+    assert splitter.handleWidth() == 1
     splitter.setSizes([480, 500]); qt.processEvents()
     before = splitter.sizes()
     splitter.moveSplitter(410, 1); qt.processEvents()
@@ -108,6 +114,10 @@ def test_resizable_columns_keep_stages_visible_and_remember_sizes(workspace):
     workspace._configure_workspace_splitter(splitter, 'operate', [500, 300])
     qt.processEvents()
     assert splitter.sizes() == saved_sizes
+    splitter.setHandleWidth(10)
+    workspace.settings.setValue('ui/operate/splitter', splitter.saveState())
+    workspace._configure_workspace_splitter(splitter, 'operate', [500, 300])
+    assert splitter.handleWidth() == 1
     for button in workspace.stage_send_buttons.values():
         assert button.isVisible()
         assert button.visibleRegion().boundingRect().contains(button.rect())

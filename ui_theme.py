@@ -113,6 +113,7 @@ def build_app_stylesheet(text_scale=1.0):
     return f"""
         QSplitter::handle {{ background: {c['border']}; border: 3px solid {c['window']}; border-radius: 4px; }}
         QSplitter::handle:hover {{ background: {c['accent']}; }}
+        QSplitter#operateSplitter::handle {{ border: none; border-radius: 0; }}
         QFrame#navigationRail {{ background: {c['surface_tab']}; border-right: 1px solid {c['border']}; }}
         QFrame#navigationRail QLabel {{ background: transparent; }}
         QLabel#brandName {{ color: {c['text_bright']}; font-size: 22px; font-weight: 800; }}

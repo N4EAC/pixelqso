@@ -2570,12 +2570,12 @@ class MainWindow(QMainWindow):
 
     def _configure_workspace_splitter(self, splitter, key, sizes):
         splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(10)
         splitter.setAccessibleName(key.replace('_', ' ').title() + " columns")
         splitter.setSizes(sizes)
         saved = self.settings.value("ui/" + key + "/splitter")
         if isinstance(saved, QByteArray):
             splitter.restoreState(saved)
+        splitter.setHandleWidth(1 if key == "operate" else 10)
         splitter.splitterMoved.connect(
             lambda *_: self.settings.setValue("ui/" + key + "/splitter", splitter.saveState()))
         for index in range(1, splitter.count()):
@@ -2612,22 +2612,31 @@ class MainWindow(QMainWindow):
         shell_layout.addWidget(rail)
         body = QWidget(); body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(24, 22, 24, 18); body_layout.setSpacing(16)
-        header = QHBoxLayout()
-        words = QVBoxLayout(); words.setSpacing(4)
+        header = QWidget()
+        words = QVBoxLayout(header)
+        words.setContentsMargins(0, 0, 0, 0); words.setSpacing(4)
         self.workspace_eyebrow = QLabel(); self.workspace_eyebrow.setObjectName("eyebrow")
         self.workspace_title = QLabel(); self.workspace_title.setObjectName("workspaceTitle"); self.workspace_title.setWordWrap(True)
         self.workspace_description = QLabel(); self.workspace_description.setObjectName("supportingText")
         self.workspace_description.setWordWrap(True)
         words.addWidget(self.workspace_eyebrow); words.addWidget(self.workspace_title)
-        words.addWidget(self.workspace_description); header.addLayout(words, 1)
-        body_layout.addLayout(header); body_layout.addWidget(pages, 1)
+        words.addWidget(self.workspace_description)
+        body_layout.addWidget(header); body_layout.addWidget(pages, 1)
         shell_layout.addWidget(body, 1)
+
+        page_copy = {
+            1: ("YOUR COLLECTION", "A world in little squares.", "Create, collect, and find the next card you want to share."),
+            2: ("YOUR CONTACTS", "Every card has a story.", "Revisit the people and artwork you have met on the air."),
+        }
+
         def select_page(index):
-            copy = (("ON THE AIR", "A little art. A real connection.", "Choose a card, listen for a friend, and start an exchange."),
-                    ("YOUR COLLECTION", "A world in little squares.", "Create, collect, and find the next card you want to share."),
-                    ("YOUR CONTACTS", "Every card has a story.", "Revisit the people and artwork you have met on the air."))[index]
-            self.workspace_eyebrow.setText(copy[0]); self.workspace_title.setText(copy[1])
-            self.workspace_description.setText(copy[2]); self.workspace_navigation.button(index).setChecked(True)
+            self.workspace_navigation.button(index).setChecked(True)
+            header.setVisible(index in page_copy)
+            if index in page_copy:
+                eyebrow, title, description = page_copy[index]
+                self.workspace_eyebrow.setText(eyebrow)
+                self.workspace_title.setText(title)
+                self.workspace_description.setText(description)
         pages.currentChanged.connect(select_page); select_page(pages.currentIndex())
         return shell
 
@@ -5319,6 +5328,7 @@ class MainWindow(QMainWindow):
             transfer_form.removeWidget(controls); sender_layout.addWidget(controls)
         left_panel.addStretch(1)
         self.operate_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.operate_splitter.setObjectName("operateSplitter")
         sender.setMinimumWidth(370); right.setMinimumWidth(300)
         receive_scroll = ContentScrollArea(); receive_scroll.setWidgetResizable(True)
         receive_scroll.setFrameShape(QFrame.Shape.NoFrame)
