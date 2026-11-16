@@ -4,8 +4,25 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 import app as pixelqso
+
+
+class RigctlClientTests(unittest.TestCase):
+    def test_waits_for_a_complete_ptt_reply(self):
+        client = pixelqso.RigctlClient()
+        client.socket = Mock()
+        client.socket.readAll.side_effect = [b"RPR", b"T 0\r", b"\n"]
+        received = Mock()
+        client.pending = ["set_ptt 1", 1, received, []]
+
+        client._read()
+        client._read()
+        received.assert_not_called()
+        client._read()
+
+        received.assert_called_once_with(["RPRT 0"])
 
 
 class TransferControlTests(unittest.TestCase):
@@ -270,6 +287,37 @@ class TransferControlTests(unittest.TestCase):
                 reconnect.assert_called_once()
             finally:
                 window.close()
+
+    def test_callsign_can_be_edited_while_data2g_is_connected(self):
+        for backend in ("data2g", "experimental"):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as folder, patch.dict(
+                    os.environ, {"PIXELQSO_DATA_DIR": folder}), patch("app.QTimer.singleShot"):
+                Path(folder, "settings.ini").write_text(
+                    f"[options]\nbackend={backend}\nshow_experimental_modes=true\n"
+                    "[radio]\nauto_connect_cat=false\n")
+                window = pixelqso.MainWindow()
+                try:
+                    def apply_callsign(dialog):
+                        self.assertTrue(window.station_call.isEnabled())
+                        window.station_call.selectAll()
+                        QTest.keyClicks(window.station_call, "w7xyz")
+                        self.assertEqual(window.station_call.text(), "w7xyz")
+                        self.assertEqual(window.settings.value("station/callsign", "N0CALL"), "N0CALL")
+                        self.assertFalse(window.station_settings_reconnect_button.isHidden())
+                        window.station_settings_reconnect_button.click()
+                        return dialog.result()
+
+                    with patch.object(pixelqso.DATA2G_ADAPTER, "is_connected", return_value=True), \
+                            patch.object(window, "_reconnect_data2g_after_settings") as reconnect, \
+                            patch.object(window, "_reconnect_rig_after_settings") as reconnect_cat, \
+                            patch("app.QDialog.exec", new=apply_callsign):
+                        window.open_station_settings()
+                    self.assertEqual(window.settings.value("station/callsign"), "W7XYZ")
+                    self.assertEqual(window.station_identity.text(), "W7XYZ · AA00")
+                    reconnect.assert_called_once()
+                    reconnect_cat.assert_not_called()
+                finally:
+                    window.close()
 
     def test_beacon_uses_single_selector_and_receive_status_keeps_geometry(self):
         old_data = pixelqso.DATA

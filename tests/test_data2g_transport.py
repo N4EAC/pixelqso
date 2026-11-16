@@ -1,3 +1,4 @@
+import errno
 import socket
 import socketserver
 import threading
@@ -175,7 +176,7 @@ class Data2GTransportTests(unittest.TestCase):
         def late_listeners(address, timeout=None, source_address=None, *, all_errors=False):
             attempts.append(address)
             if len(attempts) <= 3:
-                raise ConnectionRefusedError(111, "Connection refused")
+                raise ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
             return real_connect(address, timeout, source_address, all_errors=all_errors)
 
         client = Data2GTransport(

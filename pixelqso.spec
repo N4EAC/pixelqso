@@ -5,9 +5,10 @@ import sys
 import glob
 
 platform_icon = None
+macos = sys.platform == "darwin"
 if sys.platform == "win32":
     platform_icon = os.path.join(SPECPATH, "icon.ico")
-elif sys.platform == "darwin":
+elif macos:
     platform_icon = os.path.join(SPECPATH, "icon.icns")
 
 include_data2g_host = True
@@ -71,12 +72,22 @@ a = Analysis(
     noarchive=False,
     optimize=1,
 )
+if macos:
+    # Qt's general hooks collect the optional on-screen keyboard and PDF
+    # image reader. PixelQSO uses the native keyboard and raster images.
+    unused_qt_components = ("qtvirtualkeyboard", "/qtpdf.framework", "/qtpdf", "libqpdf.")
+    a.binaries = [entry for entry in a.binaries
+                  if not any(part in entry[0].lower() for part in unused_qt_components)
+                  and entry[0] != "QtPdf"]
+    a.datas = [entry for entry in a.datas
+               if not any(part in entry[0].lower() for part in unused_qt_components)
+               and entry[0] != "QtPdf"]
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
+    [] if macos else a.binaries,
+    [] if macos else a.datas,
     [],
     name="PixelQSO",
     debug=False,
@@ -84,6 +95,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    exclude_binaries=macos,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -92,11 +104,15 @@ exe = EXE(
     entitlements_file=None,
 )
 
-if sys.platform == "darwin":
+if macos:
+    collection = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="PixelQSO")
     app = BUNDLE(
-        exe,
+        collection,
         name="PixelQSO.app",
         icon=platform_icon,
         bundle_identifier="org.pixelqso.desktop",
-        info_plist={"NSHighResolutionCapable": "True"},
+        info_plist={
+            "NSHighResolutionCapable": True,
+            "NSMicrophoneUsageDescription": "Pixel QSO uses the selected audio input to receive radio signals.",
+        },
     )

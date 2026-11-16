@@ -24,6 +24,7 @@ for _thread_env in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"
 
 import numpy as np
 from PySide6.QtCore import Qt, QRect, QSize, QObject, QTimer, QEvent, QRunnable, QThreadPool, Signal, QStandardPaths, QMimeData, QPoint, QUrl, QSortFilterProxyModel, QBuffer, QByteArray, QIODevice, QSettings, QSignalBlocker
+from PySide6.QtCore import QEventLoop, QMicrophonePermission
 from PySide6.QtGui import QAction, QColor, QPainter, QPen, QImage, QPixmap, QFont, QIcon, QKeySequence, QShortcut, QDrag, QStandardItem, QStandardItemModel
 from PySide6.QtNetwork import QTcpSocket, QUdpSocket, QHostAddress
 from PySide6.QtMultimedia import QAudio, QAudioDevice, QAudioFormat, QAudioSink, QAudioSource, QMediaDevices
@@ -73,6 +74,7 @@ DEFAULT_STAMPS_PATH = Path(__file__).resolve().parent / "examples" / "stamps"
 DATA2G_ACK_TIMEOUT_MS = 15_000
 DATA2G_BUSY_ACK_TIMEOUT_MS = 5 * 60_000
 DATA = Path.home() / ".local" / "share" / "PixelQSO"
+MICROPHONE_DENIED = "Allow PixelQSO in System Settings → Privacy & Security → Microphone, then try again."
 AUTO_REPLY_GUARD_MS = 600
 PALETTE = [(0, 0, 0), (15, 15, 15), (0, 0, 15), (0, 15, 15),
            (0, 15, 0), (15, 15, 0), (15, 0, 0), (15, 0, 15)]
@@ -232,6 +234,7 @@ class RigctlClient(QObject):
         self.socket.errorOccurred.connect(self._error)
         self.queue = []
         self.pending = None
+        self.read_buffer = b""
         self.timer = QTimer(self); self.timer.setSingleShot(True); self.timer.timeout.connect(self._timeout)
         self.state_changed = None
 
@@ -256,6 +259,7 @@ class RigctlClient(QObject):
 
     def _disconnected(self):
         self.timer.stop(); self.pending = None; self.queue.clear()
+        self.read_buffer = b""
         if self.state_changed: self.state_changed(False, "Rig control disconnected.")
 
     def _error(self, _error):
@@ -269,13 +273,17 @@ class RigctlClient(QObject):
         self.timer.start(3000)
 
     def _read(self):
+        chunk = bytes(self.socket.readAll())
         if not self.pending: return
-        self.pending[3].extend(bytes(self.socket.readAll()).decode("utf-8", "replace").splitlines())
-        values = self.pending[3]
-        if values and values[-1].startswith("RPRT "):
-            self._finish(values)
-        elif len(values) >= self.pending[1]:
-            self._finish(values[:self.pending[1]])
+        *lines, self.read_buffer = (self.read_buffer + chunk).split(b"\n")
+        for line in lines:
+            value = line.rstrip(b"\r").decode("utf-8", "replace")
+            values = self.pending[3]
+            values.append(value)
+            if value.startswith("RPRT ") or len(values) >= self.pending[1]:
+                self.read_buffer = b""
+                self._finish(values)
+                return
 
     def _finish(self, result):
         self.timer.stop()
@@ -286,10 +294,12 @@ class RigctlClient(QObject):
 
     def _timeout(self):
         if self.pending:
-            command, _lines, callback, received = self.pending
+            _command, _lines, callback, _received = self.pending
             self.pending = None
-            callback(["ERROR: timed out"] if not received else received)
-            self._next()
+            # A late reply on this connection could be mistaken for an
+            # acknowledgment of the next command.
+            self.socket.abort()
+            callback(["ERROR: CAT reply timed out"])
 
 
 class DecodeSignals(QObject):
@@ -335,7 +345,7 @@ class RxAudioWaterfall(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(112)
+        self.setMinimumHeight(144)
         self.setMaximumHeight(190)
         self.device_name = "Waiting for receive audio"
         self.sample_rate = modem.SAMPLE_RATE
@@ -373,8 +383,9 @@ class RxAudioWaterfall(QWidget):
         clipped = float(np.mean(np.abs(recent) >= (32760.0 / 32768.0)))
         def dbfs(value):
             return "−∞" if value <= 1e-8 else f"{20 * math.log10(value):.1f}"
-        self._level_text = (f"RMS {dbfs(rms)} dBFS   Peak {dbfs(peak)} dBFS   "
-                            f"Clipped {100 * clipped:.2f}%")
+        levels = (f"RMS {dbfs(rms)} dBFS", f"Peak {dbfs(peak)} dBFS",
+                  f"Clipped {100 * clipped:.2f}%")
+        self._level_text = "   ".join(level.replace(" ", "\N{NO-BREAK SPACE}") for level in levels)
 
         samples = pcm.astype(np.float32) / 32768.0
         frame = np.concatenate((self._tail, samples))
@@ -407,15 +418,32 @@ class RxAudioWaterfall(QWidget):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(COLORS["waterfall_background"]))
         fm = painter.fontMetrics()
-        name = fm.elidedText(self.device_name, Qt.TextElideMode.ElideMiddle,
-                             max(100, self.width() - 300))
+        padding = SPACING["sm"]
+        width = max(0, self.width() - 2 * padding)
+        title = f"RX AUDIO  ·  {self.device_name}"
+        level_width = fm.horizontalAdvance(self._level_text)
+        shared_row = fm.horizontalAdvance(title) + SPACING["md"] + level_width <= width
+        title_width = width - level_width - SPACING["md"] if shared_row else width
+        text_top = SPACING["xs"]
+        baseline = text_top + fm.ascent()
+        graph_top = text_top + fm.height() + SPACING["xs"]
         painter.setPen(QColor(COLORS["waterfall_text"]))
-        painter.drawText(8, 17, f"RX AUDIO  ·  {name}")
+        painter.drawText(padding, baseline,
+                         fm.elidedText(title, Qt.TextElideMode.ElideMiddle, title_width))
         painter.setPen(QColor(COLORS["waterfall_text_secondary"]))
-        painter.drawText(max(8, self.width() - fm.horizontalAdvance(self._level_text) - 8),
-                         17, self._level_text)
+        if shared_row:
+            painter.drawText(self.width() - padding - level_width, baseline, self._level_text)
+        else:
+            level_rect = QRect(padding, graph_top, width, max(0, self.height() - graph_top))
+            levels = painter.drawText(level_rect, int(Qt.TextFlag.TextWordWrap), self._level_text)
+            graph_top = levels.bottom() + 1 + SPACING["xs"]
 
-        graph = self.rect().adjusted(42, 24, -8, -22)
+        axis_left = max(42, fm.horizontalAdvance("−100") + padding)
+        axis_right = max(padding, fm.horizontalAdvance("4k") // 2 + SPACING["xs"])
+        graph = self.rect().adjusted(axis_left, graph_top, -axis_right, -fm.height() - padding)
+        if graph.isEmpty():
+            painter.end()
+            return
         image_data = self._rows.tobytes()
         image = QImage(image_data, self.COLUMNS, self.ROWS, self.COLUMNS * 3,
                        QImage.Format.Format_RGB888)
@@ -427,7 +455,9 @@ class RxAudioWaterfall(QWidget):
             x = graph.left() + round(graph.width() * khz / 4)
             painter.drawLine(x, graph.top(), x, graph.bottom())
             painter.setPen(QColor(COLORS["waterfall_text_secondary"]))
-            painter.drawText(x - 12, self.height() - 5, f"{khz}k")
+            label = f"{khz}k"
+            painter.drawText(x - fm.horizontalAdvance(label) // 2,
+                             graph.bottom() + fm.ascent() + SPACING["xs"], label)
             waterfall_grid = QColor(COLORS["waterfall_grid"])
             waterfall_grid.setAlpha(95)
             painter.setPen(QPen(waterfall_grid, 1))
@@ -435,9 +465,12 @@ class RxAudioWaterfall(QWidget):
             y = graph.top() + round(graph.height() * (-20 - db_label) / 80)
             painter.drawLine(graph.left(), y, graph.right(), y)
         painter.setPen(QColor(COLORS["waterfall_text_secondary"]))
-        painter.drawText(3, graph.top() + 4, "−20")
-        painter.drawText(3, graph.center().y() + 4, "−60")
-        painter.drawText(3, graph.bottom(), "−100")
+        if graph.height() >= fm.height():
+            painter.drawText(3, graph.top() + fm.ascent(), "−20")
+        if graph.height() >= 2 * fm.height():
+            painter.drawText(3, graph.bottom() - fm.descent(), "−100")
+        if graph.height() >= 3 * fm.height():
+            painter.drawText(3, graph.center().y() + (fm.ascent() - fm.descent()) // 2, "−60")
         painter.end()
 
 
@@ -2217,6 +2250,7 @@ class MainWindow(QMainWindow):
             self.settings.value("data2g/ptt_failed", "false")).lower() in {
                 "1", "true", "yes", "on"}
         self._closing = False
+        self._microphone_request_pending = False
         try:
             self.cached_data2g_modes = [Data2GMode(**item) for item in
                                         json.loads(self.settings.value("data2g/modes", "[]"))]
@@ -5647,6 +5681,19 @@ class MainWindow(QMainWindow):
         return (DATA2G_ADAPTER.is_connected(self.data2g_session)
                 if backend == "data2g" else self.rig.connected())
 
+    def _station_settings_reconnect_targets(self, before, after):
+        changed = {key for key in self._station_connection_keys()
+                   if before["values"].get(key) != after["values"].get(key)}
+        targets = set()
+        if "station_call" in changed and DATA2G_ADAPTER.is_connected(self.data2g_session):
+            targets.add("data2g")
+        if changed and self._station_connection_is_active():
+            if self.backend_combo.currentData() == "data2g":
+                targets.add("data2g")
+            elif changed - {"station_call"}:
+                targets.add("rig")
+        return targets
+
     def _connect_station_settings_change_signals(self):
         controls = (self.backend_combo, self.station_call, self.station_grid, self.cwid_enabled,
                     self.cwid_message, self.data2g_host_source,
@@ -5672,10 +5719,13 @@ class MainWindow(QMainWindow):
         before = self._station_settings_baseline
         changed = current != before
         connection_changed = self._station_settings_connection_changed(before, current)
-        reconnect = connection_changed and self._station_connection_is_active()
+        reconnect = bool(self._station_settings_reconnect_targets(before, current))
         active = self._station_operation_active()
         self.station_settings_apply_button.setVisible(not reconnect)
         self.station_settings_reconnect_button.setVisible(reconnect)
+        default_button = (self.station_settings_reconnect_button if reconnect
+                          else self.station_settings_apply_button)
+        default_button.setDefault(True)
         self.station_settings_apply_button.setEnabled(not active)
         self.station_settings_reconnect_button.setEnabled(not active)
         self.station_settings_cancel_button.setText("Cancel" if changed else "Close")
@@ -5720,14 +5770,14 @@ class MainWindow(QMainWindow):
             return
         self._station_settings_baseline = self._station_settings_values()
         self._station_settings_editing = True
-        self._station_settings_reconnect = None
+        self._station_settings_reconnect = set()
         self._update_station_settings_actions()
         result = self.station_dialog.exec()
         if result != QDialog.DialogCode.Accepted:
             self._restore_station_settings(self._station_settings_baseline)
             self._station_settings_editing = False
             self._station_settings_baseline = None
-            self._station_settings_reconnect = None
+            self._station_settings_reconnect = set()
             self._restore_station_settings_connection_controls()
             return
         self._station_settings_editing = False
@@ -5736,13 +5786,13 @@ class MainWindow(QMainWindow):
             self._station_settings_baseline["values"].get("backend_combo") !=
             self.backend_combo.currentIndex())
         self._station_settings_baseline = None
-        self._station_settings_reconnect = None
+        self._station_settings_reconnect = set()
         self._restore_station_settings_connection_controls()
         if backend_changed:
             self._on_backend_selection_changed()
-        if reconnect == "data2g":
+        if "data2g" in reconnect:
             self._reconnect_data2g_after_settings()
-        elif reconnect == "rig":
+        if "rig" in reconnect:
             self._reconnect_rig_after_settings()
 
     def _restore_station_settings_connection_controls(self):
@@ -5838,9 +5888,8 @@ class MainWindow(QMainWindow):
             return
         before = self._station_settings_baseline
         after = self._station_settings_values()
-        connection_changed = self._station_settings_connection_changed(before, after)
-        connected = self._station_connection_is_active()
-        if connection_changed and connected and not reconnect:
+        reconnect_targets = self._station_settings_reconnect_targets(before, after)
+        if reconnect_targets and not reconnect:
             self._update_station_settings_actions()
             return
         if (not self.show_experimental_modes.isChecked() and
@@ -5865,9 +5914,7 @@ class MainWindow(QMainWindow):
                     self._data2g_audio_device_changed(setting)
         finally:
             self._station_settings_editing = True
-        if reconnect and connection_changed and connected:
-            self._station_settings_reconnect = (
-                "data2g" if self.backend_combo.currentData() == "data2g" else "rig")
+        self._station_settings_reconnect = reconnect_targets
         self.station_dialog.accept()
 
     def _reconnect_data2g_after_settings(self):
@@ -5875,6 +5922,8 @@ class MainWindow(QMainWindow):
         if session is None or not DATA2G_ADAPTER.is_connected(session):
             return
         self.data2g_reconnect_after_settings = True
+        if self.data2g_closing:
+            return
         self.data2g_closing = True
         self.data2g_host_status.setText("Applying settings · reconnecting Data2G…")
         self._update_data2g_host_controls()
@@ -5937,9 +5986,47 @@ class MainWindow(QMainWindow):
             self.data2g_output_device.setEnabled(not remote and settings_available)
         self._update_backend_ui()
 
+    def _audio_input_permitted(self, retry, denied):
+        if sys.platform != "darwin" or not getattr(sys, "frozen", False):
+            return True
+        application = QApplication.instance()
+        permission = QMicrophonePermission()
+        status = application.checkPermission(permission)
+        if status == Qt.PermissionStatus.Granted:
+            return True
+        if status == Qt.PermissionStatus.Denied:
+            denied()
+        elif not self._microphone_request_pending:
+            self._microphone_request_pending = True
+
+            def completed(result):
+                self._microphone_request_pending = False
+                if not self._closing:
+                    if result.status() == Qt.PermissionStatus.Granted:
+                        retry()
+                    else:
+                        denied()
+
+            application.requestPermission(permission, self, completed)
+        return False
+
     def _start_local_data2g_host(self):
         if self.data2g_local_process and self.data2g_local_process.poll() is None:
             return True
+
+        def retry():
+            if (self.data2g_host_source.currentData() == "local" and
+                    not self.data2g_local_process):
+                if self.backend_combo.currentData() == "data2g":
+                    self._connect_data2g_host()
+                else:
+                    self._ensure_data2g_background_monitor()
+
+        if not self._audio_input_permitted(
+                retry, lambda: self.data2g_host_status.setText(MICROPHONE_DENIED)):
+            if self._microphone_request_pending:
+                self.data2g_host_status.setText("Waiting for microphone permission…")
+            return False
         try:
             import importlib.util
             if importlib.util.find_spec("data2g.host") is None:
@@ -6179,8 +6266,7 @@ class MainWindow(QMainWindow):
             threading.Thread(target=DATA2G_ADAPTER.disconnect, args=(self.data2g_session,), daemon=True,
                              name="data2g-close").start()
             return
-        if (self.backend_combo.currentData() == "data2g" and
-                self._station_settings_connection_edits_pending()):
+        if self._station_settings_connection_edits_pending():
             self.data2g_host_status.setText(
                 "Apply or cancel the pending connection changes before connecting.")
             return
@@ -6777,10 +6863,13 @@ class MainWindow(QMainWindow):
             self.station_button.setText(
                 "Station settings" if connected else "Connect station")
         if hasattr(self, "station_call"):
-            self.station_call.setEnabled(not host_busy)
+            changing_host = (self.data2g_connecting or self.data2g_local_starting or
+                             self.data2g_closing or self.data2g_handoff_pending)
+            self.station_call.setEnabled(not changing_host and not self._station_operation_active())
             self.station_call.setToolTip(
-                "Disconnect the Data2G host before changing call sign; the open group uses this identity."
-                if host_busy else "Used in card identity and when opening the Data2G broadcast group.")
+                "Wait for the Data2G connection to finish changing." if changing_host else
+                "Apply and reconnect to use the new call sign with Data2G." if host_busy else
+                "Used in card identity and when opening the Data2G broadcast group.")
         if hasattr(self, "receive_status_hint"):
             if self.data2g_ptt_failed:
                 message = ("The Data2G host reported a PTT failure. Verify the radio is unkeyed; "
@@ -7041,6 +7130,8 @@ class MainWindow(QMainWindow):
                 self.exchange_mode.setCurrentIndex(0); self.manual_stage_buttons[stage].setChecked(True)
                 request["result"] = {"stage": stage}
             elif method == "POST" and path == "transmit":
+                if self._station_settings_connection_edits_pending():
+                    raise ValueError("Apply or cancel the pending station settings before transmitting")
                 if self.auto_armed: raise ValueError("Stop automatic exchange before remote manual transmit")
                 if self.tx_audio or self.tx_timer.isActive() or self.ptt_active: raise ValueError("A transmission is already active")
                 QTimer.singleShot(0, self.transmit_exchange)
@@ -8447,7 +8538,7 @@ class MainWindow(QMainWindow):
         self.listen_indicator.setStyleSheet(status_label_style("warning"))
 
     def _ensure_session_receive(self):
-        if self.rx_timer.isActive() or self.tx_timer.isActive() or self.ptt_active:
+        if self._closing or self.rx_timer.isActive() or self.tx_timer.isActive() or self.ptt_active:
             return
         if self.selected_adapter().capabilities.kind is AdapterKind.FRAME_TRANSPORT:
             self.listen_indicator.setText("● DATA2G HOST RX")
@@ -8829,7 +8920,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Data2G mode unavailable",
                                 backend.disabled_reason or "Reconnect to discover usable Data2G modes.")
             return
-        if not self.data2g_session or not DATA2G_ADAPTER.is_connected(self.data2g_session):
+        if (self.data2g_closing or not self.data2g_session or
+                not DATA2G_ADAPTER.is_connected(self.data2g_session)):
             QMessageBox.warning(self, "Data2G host unavailable", "Connect to a Data2G host in Station settings before transmitting.")
             return
         if not self._confirm_data2g_ptt_recovery():
@@ -9249,6 +9341,8 @@ class MainWindow(QMainWindow):
         self.read_rig(lambda ok: self._confirm_tx_readback(ok, generation))
 
     def _confirm_tx_readback(self, read_ok, generation=None):
+        if self._closing:
+            return
         if generation is not None and (not self.auto_armed or generation != self.auto_generation):
             self.tx_bytes = b""
             self.refresh_tx_button()
@@ -9264,6 +9358,8 @@ class MainWindow(QMainWindow):
         self.rig.request("set_ptt 1", 1, lambda response: self._ptt_started(response, generation))
 
     def _ptt_started(self, response, generation=None):
+        if self._closing:
+            return
         if self.tx_label == "one-shot card beacon" and not self.beacon_pending:
             if response == ["RPRT 0"]:
                 self.rig.request("set_ptt 0", 1, lambda _result: self.refresh_tx_button())
@@ -9298,6 +9394,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(350, self._start_tx_audio)
 
     def _start_tx_audio(self):
+        if self._closing:
+            return
         if os.environ.get("PIXELQSO_AUDIO_ROLE") == "websdr-rx":
             self._finish_tx("Receive-only WebSDR window; transmission skipped.")
             return
@@ -9470,7 +9568,14 @@ class MainWindow(QMainWindow):
 
     def _ptt_released(self, response):
         self.refresh_tx_button()
-        self.exchange_log.append("PTT released." if response == ["RPRT 0"] else "PTT release response: " + " ".join(response))
+        if response != ["RPRT 0"]:
+            message = "CAT could not confirm PTT release. Verify that the radio is unkeyed."
+            self.exchange_log.append(message + " " + " ".join(response))
+            self._set_transmission_result(message, tone="warning")
+            if self.auto_armed:
+                self.stop_auto_exchange(message)
+            return
+        self.exchange_log.append("PTT released.")
         self._continue_auto_receive()
 
     def _continue_auto_receive(self):
@@ -9600,7 +9705,7 @@ class MainWindow(QMainWindow):
         self.read_rig(lambda ok: self._confirm_beacon_readback(ok, actual_frequency, self.rig_mode))
 
     def _confirm_beacon_readback(self, read_ok, frequency, mode):
-        if not self.beacon_pending:
+        if self._closing or not self.beacon_pending:
             return
         if (not read_ok or not self.rig.connected() or abs(self.frequency.value()-frequency) > 10
                 or self.rig_mode != mode or self.frequency.value() != self._confirmed_frequency
@@ -9769,6 +9874,8 @@ class MainWindow(QMainWindow):
         self.rx_capture_sample_offset = 0
 
     def start_receive(self, quiet=False):
+        if self._closing:
+            return
         if self.selected_adapter().capabilities.kind is AdapterKind.FRAME_TRANSPORT:
             self._ensure_session_receive()
             return
@@ -9795,6 +9902,12 @@ class MainWindow(QMainWindow):
 
         self.rx_rate = modem.SAMPLE_RATE
         test_mode = self.test_link_enabled and self.audio_test_mode.isChecked()
+        if not test_mode and not self._audio_input_permitted(
+                lambda: self.start_receive(quiet=quiet),
+                lambda: receive_error("Microphone access denied", MICROPHONE_DENIED)):
+            if self._microphone_request_pending:
+                self.rx_status.setText("Waiting for microphone permission…")
+            return
         audio_format = QAudioFormat()
         audio_format.setSampleRate(modem.SAMPLE_RATE)
         audio_format.setChannelCount(1)
@@ -10651,10 +10764,39 @@ class MainWindow(QMainWindow):
                           "snr_db": snr_db}, "pixels": pixels}
 
     def closeEvent(self, event):
+        if self._closing:
+            event.ignore()
+            return
         self.beacon_timer.stop()
         self.beacon_status_timer.stop()
         self.receive_activity_timeout.stop()
         self._closing = True
+        self.tx_timer.stop()
+        if self.tx_audio:
+            self.tx_audio.stop()
+        pending_ptt = self.rig.pending and self.rig.pending[0].startswith("set_ptt ")
+        self.rig.queue.clear()
+        if self.rig.connected() and (self.ptt_active or pending_ptt):
+            release_loop = QEventLoop()
+            deadline = QTimer()
+            deadline.setSingleShot(True)
+            deadline.timeout.connect(release_loop.quit)
+            response = []
+
+            def released(result):
+                response.extend(result)
+                release_loop.quit()
+
+            self.rig.request("set_ptt 0", 1, released)
+            deadline.start(6500)
+            release_loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+            if response != ["RPRT 0"]:
+                print("CAT could not confirm PTT release during shutdown. Verify that the radio is unkeyed.",
+                      file=sys.stderr)
+        self.ptt_active = False
+        self.tx_audio = None
+        self.tx_device = None
+        self.rig.disconnect()
         self.data2g_handoff_pending = False
         if self.data2g_connect_worker is not None:
             self.data2g_connect_worker.cancel()

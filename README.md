@@ -73,6 +73,21 @@ python -m pip install -r requirements-app.txt
 python app.py
 ```
 
+### macOS audio and radio
+
+Open `PixelQSO.app` and allow microphone access when macOS prompts. In
+**Station settings → Audio & Radio**, select the radio's receive and transmit
+audio devices. Use the **Managed Data2G host radio/PTT** controls for the
+default Data2G backend, or the **Experimental modem** controls for local
+modes. If microphone access was denied, enable PixelQSO under
+**System Settings → Privacy & Security → Microphone** and reconnect.
+
+CAT and PTT use a running Hamlib `rigctld` service. Install Hamlib with
+`brew install hamlib` if the station does not already provide a rigctld
+endpoint. Configure rigctld for the radio and enter its host and port in
+the corresponding backend's settings. The default endpoint is
+`127.0.0.1:4532`.
+
 ### Windows (install from Python)
 
 This runs Pixel QSO from its Python package instead of the unsigned Windows
