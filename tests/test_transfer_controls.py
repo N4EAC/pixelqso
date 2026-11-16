@@ -276,6 +276,13 @@ class TransferControlTests(unittest.TestCase):
             try:
                 def apply_connection_change(dialog):
                     window.data2g_host_input.setText("radio.example")
+                    self.assertEqual(window.data2g_tci_port.value(), 60000)
+                    window.data2g_host_source.setCurrentIndex(window.data2g_host_source.findData("local"))
+                    window.data2g_audio_transport.setCurrentIndex(window.data2g_audio_transport.findData("tci"))
+                    self.assertFalse(window.data2g_tci_port.isHidden())
+                    self.assertTrue(window.data2g_output_device.isHidden())
+                    window.data2g_tci_port.setValue(61000)
+                    window.data2g_tx_gain.setValue(-12)
                     self.assertFalse(window.station_settings_reconnect_button.isHidden())
                     window._apply_station_settings(reconnect=True)
                     return dialog.result()
@@ -284,6 +291,9 @@ class TransferControlTests(unittest.TestCase):
                         patch("app.QDialog.exec", new=apply_connection_change):
                     window.open_station_settings()
                 self.assertEqual(window.settings.value("data2g/host"), "radio.example")
+                self.assertEqual(window.settings.value("data2g/audio_transport"), "tci")
+                self.assertEqual(window.settings.value("data2g/tci_port", type=int), 61000)
+                self.assertEqual(window.settings.value("data2g/tx_gain_db", type=int), -12)
                 reconnect.assert_called_once()
             finally:
                 window.close()

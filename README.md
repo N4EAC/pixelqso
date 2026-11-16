@@ -77,12 +77,22 @@ python app.py
 
 Open `PixelQSO.app` and allow microphone access when macOS prompts. In
 **Station settings → Audio & Radio**, select the radio's receive and transmit
-audio devices. Use the **Managed Data2G host radio/PTT** controls for the
+audio devices. Use **RX audio input** and **TX audio output** under
+**Local Data2G audio and PTT** for the
 default Data2G backend, or the **Experimental modem** controls for local
-modes. If microphone access was denied, enable PixelQSO under
+modes. With AetherSDR, select the slice’s **AetherSDR DAX** channel for RX
+and **AetherSDR TX** for TX. If microphone access was denied, enable PixelQSO under
 **System Settings → Privacy & Security → Microphone** and reconnect.
 
-CAT and PTT use a running Hamlib `rigctld` service. Install Hamlib with
+Use **TX gain** to reduce the local Data2G output level in dB. **0 dB**
+keeps the original modem level. Apply and reconnect to use the new gain.
+
+For AetherSDR on the same Mac, enable its TCI server and choose **AetherSDR TCI**
+under **Audio transport**. Enter the server port (default **60000**) and the
+TCI receiver number (normally **0** for the first slice). Put that slice in
+**DIGU** or **DIGL** and apply the settings. TCI carries both audio and PTT.
+
+For sound-device setups, CAT and PTT use a running Hamlib `rigctld` service. Install Hamlib with
 `brew install hamlib` if the station does not already provide a rigctld
 endpoint. Configure rigctld for the radio and enter its host and port in
 the corresponding backend's settings. The default endpoint is

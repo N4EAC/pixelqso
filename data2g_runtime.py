@@ -4,6 +4,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+DATA2G_MIN_TX_GAIN_DB = -60
+DATA2G_MAX_TX_GAIN_DB = 0
+
 
 def int_setting(value, default: int) -> int:
     """Read an integer setting without letting stale text abort app startup."""
@@ -108,16 +111,19 @@ def validate_data2g_ports(command_port: int, kiss_port: int) -> None:
 
 def local_host_arguments(*, command_port: int, kiss_port: int, callsign: str,
                          input_device: str, output_device: str, rig_host: str,
-                         rig_port: int, bandwidth_hz: int, record_dir: str) -> list[str]:
+                         rig_port: int, bandwidth_hz: int, record_dir: str,
+                         tx_gain_db: int = DATA2G_MAX_TX_GAIN_DB) -> list[str]:
     """Create explicit server CLI settings from the station's saved options."""
     if bandwidth_hz not in (500, 2400):
         raise ValueError("Data2G host bandwidth must be 500 or 2400 Hz")
+    if not DATA2G_MIN_TX_GAIN_DB <= tx_gain_db <= DATA2G_MAX_TX_GAIN_DB:
+        raise ValueError("Data2G TX gain must be between −60 and 0 dB")
     validate_data2g_ports(command_port, kiss_port)
     args = ["--host", "127.0.0.1", "--kiss-address", "127.0.0.1",
             "--command-port", str(command_port), "--kiss-port", str(kiss_port),
             "--kiss-bw", str(bandwidth_hz), "--mycall", callsign.strip().upper(),
             "--rigctld-host", rig_host.strip(), "--rigctld-port", str(rig_port),
-            "--record-dir", record_dir]
+            "--record-dir", record_dir, "--output-volume", str(tx_gain_db)]
     if input_device:
         args.extend(("--input-device", input_device))
     if output_device:

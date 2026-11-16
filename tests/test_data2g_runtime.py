@@ -1,16 +1,36 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch, sentinel
 
 from data2g import modem
 from data2g import codes
 from data2g.arq.engine import receive_accept
 from data2g_receive_host import (enable_advertised_receive_lengths,
+                                 limit_aether_dax_tx_buffer,
                                  waterfall_audio_datagram)
 from data2g_runtime import (data2g_audio_device_selector, local_host_arguments,
                             local_host_command)
 
 
 class Data2GRuntimeTests(unittest.TestCase):
+    def test_aether_tx_opens_with_a_smaller_buffer(self):
+        from data2g import host
+
+        pa = Mock()
+        pa.open.return_value = sentinel.stream
+        with patch.object(host, "Player", host.Player):
+            limit_aether_dax_tx_buffer()
+            for device, name, frames in (
+                    (11, "AetherSDR TX", 256),
+                    (None, "AetherSDR TX", 256),
+                    (1, "MacBook Pro Speakers", 2048)):
+                with self.subTest(device=device, name=name):
+                    pa.get_device_info_by_index.return_value = {"name": name}
+                    pa.get_default_output_device_info.return_value = {"name": name}
+                    player = host.Player(pa, 2, 48000, device, 0.1)
+                    self.assertEqual(pa.open.call_args.kwargs["frames_per_buffer"], frames)
+                    self.assertEqual(pa.open.call_args.kwargs["output_device_index"], device)
+                    self.assertIs(player.s, sentinel.stream)
+
     def test_waterfall_tap_mirrors_the_host_left_channel_and_rate(self):
         import numpy as np
         audio = np.asarray([0.25, -0.25, 0.5, -0.5], dtype=np.float32).tobytes()
@@ -101,7 +121,7 @@ class Data2GRuntimeTests(unittest.TestCase):
             command_port=8300, kiss_port=8100, callsign="ag7su",
             input_device="WebSDR loopback", output_device="USB Audio",
             rig_host="127.0.0.1", rig_port=4532,
-            bandwidth_hz=500, record_dir="captures/data2g")
+            bandwidth_hz=500, record_dir="captures/data2g", tx_gain_db=-12)
         pairs = dict(zip(args[::2], args[1::2]))
         self.assertEqual(pairs["--host"], "127.0.0.1")
         self.assertEqual(pairs["--command-port"], "8300")
@@ -112,6 +132,7 @@ class Data2GRuntimeTests(unittest.TestCase):
         self.assertEqual(pairs["--rigctld-host"], "127.0.0.1")
         self.assertEqual(pairs["--rigctld-port"], "4532")
         self.assertEqual(pairs["--kiss-bw"], "500")
+        self.assertEqual(pairs["--output-volume"], "-12")
 
     def test_audio_device_selector_uses_stable_backend_id(self):
         self.assertEqual(data2g_audio_device_selector(

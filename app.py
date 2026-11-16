@@ -56,7 +56,8 @@ from card_backends import (BACKENDS, DEFAULT_MODE_KEY, LEGACY_MODE_KEY, MODE_REG
 from card_transfer import CardAssemblyService
 from card_requests import RequestCache, UNVERIFIED, ANIMATION_PARTNER
 from data2g_transport import Data2GMode
-from data2g_runtime import (data2g_audio_device_selector,
+from data2g_runtime import (DATA2G_MAX_TX_GAIN_DB, DATA2G_MIN_TX_GAIN_DB,
+                            data2g_audio_device_selector,
                             data2g_host_audio_devices,
                             data2g_host_audio_selector_for_name, int_setting,
                             local_host_arguments, local_host_command,
@@ -2273,6 +2274,7 @@ class MainWindow(QMainWindow):
         self.data2g_connect_worker = None
         self.data2g_tx_frames = []
         self.data2g_tx_waiting = None
+        self.data2g_stopping_tx = False
         self.data2g_tx_sent = 0
         self.data2g_tx_total = 0
         self.data2g_tag = 0
@@ -2342,6 +2344,24 @@ class MainWindow(QMainWindow):
         bandwidth_index = self.data2g_host_bandwidth.findData(
             int_setting(self.settings.value("data2g/bandwidth_hz", 2400), 2400))
         self.data2g_host_bandwidth.setCurrentIndex(max(0, bandwidth_index))
+        self.data2g_audio_transport = QComboBox()
+        self.data2g_audio_transport.addItem("Sound devices / rigctld", "device")
+        self.data2g_audio_transport.addItem("AetherSDR TCI", "tci")
+        transport = self.settings.value("data2g/audio_transport", "device")
+        self.data2g_audio_transport.setCurrentIndex(max(0, self.data2g_audio_transport.findData(transport)))
+        self.data2g_audio_transport.currentIndexChanged.connect(self._update_data2g_host_controls)
+        self.data2g_tci_port = QSpinBox()
+        self.data2g_tci_port.setRange(1, 65535)
+        self.data2g_tci_port.setValue(int_setting(self.settings.value("data2g/tci_port", 60000), 60000))
+        self.data2g_tci_receiver = QSpinBox()
+        self.data2g_tci_receiver.setRange(0, 15)
+        self.data2g_tci_receiver.setValue(int_setting(self.settings.value("data2g/tci_receiver", 0), 0))
+        self.data2g_tci_receiver.setToolTip("TCI receiver 0 is normally AetherSDR’s first slice. TCI keys this receiver for transmit.")
+        self.data2g_tx_gain = QSpinBox()
+        self.data2g_tx_gain.setRange(DATA2G_MIN_TX_GAIN_DB, DATA2G_MAX_TX_GAIN_DB)
+        self.data2g_tx_gain.setSuffix(" dB")
+        self.data2g_tx_gain.setValue(int_setting(self.settings.value("data2g/tx_gain_db", 0), 0))
+        self.data2g_tx_gain.setToolTip("Reduce the modem audio level sent to the radio. 0 dB is the original full-scale output.")
         self.data2g_rig_host = QLineEdit(os.environ.get(
             "PIXELQSO_DATA2G_RIGCTLD_HOST", str(self.settings.value(
                 "data2g/rigctld_host", self.settings.value("radio/rigctld_host", "127.0.0.1")))))
@@ -4673,7 +4693,10 @@ class MainWindow(QMainWindow):
         w = QWidget(); root = QVBoxLayout(w)
         root.setContentsMargins(*([SPACING["lg"]] * 4)); root.setSpacing(SPACING["md"])
         top = QHBoxLayout()
-        self.station_button = QPushButton("Station settings"); self.station_button.clicked.connect(self.open_station_settings); top.addWidget(self.station_button)
+        self.station_button = QPushButton("Station settings")
+        self.station_button.clicked.connect(lambda: self.open_station_settings(page_index=1))
+        self.station_button.setToolTip("Open Audio & Radio settings")
+        top.addWidget(self.station_button)
         self.station_identity = QLabel()
         self.station_identity.setObjectName("stationIdentity")
         self.station_identity.setAccessibleDescription("Current station callsign and grid square.")
@@ -5501,17 +5524,23 @@ class MainWindow(QMainWindow):
         self.data2g_settings_group = QGroupBox("Data2G host")
         data2g_form = QFormLayout(self.data2g_settings_group)
         data2g_form.addRow("Connection", self.data2g_host_source)
+        self.data2g_radio_group = QGroupBox("Local Data2G audio and PTT")
+        data2g_radio_form = QFormLayout(self.data2g_radio_group)
+        data2g_radio_form.addRow("Audio transport", self.data2g_audio_transport)
+        data2g_radio_form.addRow("TCI port on this Mac", self.data2g_tci_port)
+        data2g_radio_form.addRow("TCI receiver", self.data2g_tci_receiver)
+        self.data2g_input_device.setToolTip("Audio from the radio. For AetherSDR, choose the slice’s DAX channel.")
+        self.data2g_output_device.setToolTip("Audio to the radio. For AetherSDR, choose AetherSDR TX.")
+        data2g_radio_form.addRow("RX audio input", self.data2g_input_device)
+        data2g_radio_form.addRow("TX audio output", self.data2g_output_device)
+        data2g_radio_form.addRow("TX gain", self.data2g_tx_gain)
+        data2g_radio_form.addRow("Host rigctld", self.data2g_rig_host)
+        data2g_radio_form.addRow("Port", self.data2g_rig_port)
+        data2g_form.addRow(self.data2g_radio_group)
         data2g_form.addRow("Host", self.data2g_host_input)
         data2g_form.addRow("Command port", self.data2g_command_port)
         data2g_form.addRow("KISS port", self.data2g_kiss_port)
         data2g_form.addRow("Local host bandwidth", self.data2g_host_bandwidth)
-        self.data2g_radio_group = QGroupBox("Managed Data2G host radio/PTT")
-        data2g_radio_form = QFormLayout(self.data2g_radio_group)
-        data2g_radio_form.addRow("Host rigctld", self.data2g_rig_host)
-        data2g_radio_form.addRow("Port", self.data2g_rig_port)
-        data2g_radio_form.addRow("Host audio input", self.data2g_input_device)
-        data2g_radio_form.addRow("Host audio output", self.data2g_output_device)
-        data2g_form.addRow(self.data2g_radio_group)
         host_radio_note = QLabel(
             "Managed-host audio and rigctld settings apply only to a local server; remote "
             "hosts use their own radio settings. A successful API connection does not confirm host audio or "
@@ -5639,6 +5668,10 @@ class MainWindow(QMainWindow):
             "data2g_command_port": self.data2g_command_port,
             "data2g_kiss_port": self.data2g_kiss_port,
             "data2g_host_bandwidth": self.data2g_host_bandwidth,
+            "data2g_audio_transport": self.data2g_audio_transport,
+            "data2g_tci_port": self.data2g_tci_port,
+            "data2g_tci_receiver": self.data2g_tci_receiver,
+            "data2g_tx_gain": self.data2g_tx_gain,
             "data2g_rig_host": self.data2g_rig_host,
             "data2g_rig_port": self.data2g_rig_port,
             "data2g_input_device": self.data2g_input_device,
@@ -5666,7 +5699,8 @@ class MainWindow(QMainWindow):
 
     def _station_connection_keys(self):
         return ("backend_combo", "station_call", "data2g_host_source", "data2g_host_input",
-                "data2g_command_port", "data2g_kiss_port", "data2g_host_bandwidth",
+                "data2g_command_port", "data2g_kiss_port", "data2g_host_bandwidth", "data2g_tx_gain",
+                "data2g_audio_transport", "data2g_tci_port", "data2g_tci_receiver",
                 "data2g_rig_host", "data2g_rig_port", "data2g_input_device",
                 "data2g_output_device", "rig_host", "rig_port", "input_device",
                 "output_device")
@@ -5709,7 +5743,8 @@ class MainWindow(QMainWindow):
                     self.cwid_message, self.data2g_host_source,
                     self.interface_text_size,
                     self.data2g_host_input, self.data2g_command_port,
-                    self.data2g_kiss_port, self.data2g_host_bandwidth,
+                    self.data2g_kiss_port, self.data2g_host_bandwidth, self.data2g_tx_gain,
+                    self.data2g_audio_transport, self.data2g_tci_port, self.data2g_tci_receiver,
                     self.data2g_rig_host, self.data2g_rig_port,
                     self.data2g_input_device, self.data2g_output_device,
                     self.output_device, self.input_device, self.repeat_count, self.interlaced_copies, self.rig_host,
@@ -5829,6 +5864,10 @@ class MainWindow(QMainWindow):
             "data2g_command_port": self.data2g_command_port,
             "data2g_kiss_port": self.data2g_kiss_port,
             "data2g_host_bandwidth": self.data2g_host_bandwidth,
+            "data2g_audio_transport": self.data2g_audio_transport,
+            "data2g_tci_port": self.data2g_tci_port,
+            "data2g_tci_receiver": self.data2g_tci_receiver,
+            "data2g_tx_gain": self.data2g_tx_gain,
             "data2g_rig_host": self.data2g_rig_host,
             "data2g_rig_port": self.data2g_rig_port,
             "data2g_input_device": self.data2g_input_device,
@@ -5961,7 +6000,8 @@ class MainWindow(QMainWindow):
         self.data2g_command_port.setEnabled(settings_available)
         self.data2g_kiss_port.setEnabled(settings_available)
         self.data2g_host_bandwidth.setEnabled(not remote and settings_available)
-        local_audio_ready = (remote or not self.data2g_audio_config_errors)
+        local_audio_ready = (remote or self._local_data2g_uses_tci() or
+                             not self.data2g_audio_config_errors)
         pending_connection_changes = (
             self.backend_combo.currentData() == "data2g" and
             self._station_settings_connection_edits_pending())
@@ -5991,10 +6031,21 @@ class MainWindow(QMainWindow):
         if hasattr(self, "data2g_radio_group"):
             self.data2g_radio_group.setVisible(not remote)
             self.data2g_radio_group.setEnabled(settings_available)
+            form = self.data2g_radio_group.layout()
+            tci = self._local_data2g_uses_tci()
+            for field in (self.data2g_tci_port, self.data2g_tci_receiver):
+                form.setRowVisible(field, tci)
+            for field in (self.data2g_input_device, self.data2g_output_device,
+                          self.data2g_rig_host, self.data2g_rig_port):
+                form.setRowVisible(field, not tci)
         if hasattr(self, "data2g_input_device"):
             self.data2g_input_device.setEnabled(not remote and settings_available)
             self.data2g_output_device.setEnabled(not remote and settings_available)
         self._update_backend_ui()
+
+    def _local_data2g_uses_tci(self):
+        return (self.data2g_host_source.currentData() == "local" and
+                self.data2g_audio_transport.currentData() == "tci")
 
     def _audio_input_permitted(self, retry, denied):
         if sys.platform != "darwin" or not getattr(sys, "frozen", False):
@@ -6032,7 +6083,8 @@ class MainWindow(QMainWindow):
                 else:
                     self._ensure_data2g_background_monitor()
 
-        if not self._audio_input_permitted(
+        tci = self._local_data2g_uses_tci()
+        if not tci and not self._audio_input_permitted(
                 retry, lambda: self.data2g_host_status.setText(MICROPHONE_DENIED)):
             if self._microphone_request_pending:
                 self.data2g_host_status.setText("Waiting for microphone permission…")
@@ -6050,7 +6102,9 @@ class MainWindow(QMainWindow):
             # dedicated selector is left at System default, pass the station
             # audio selection through by name; an empty host selector used to
             # silently omit both CLI options and ignore the selected devices.
-            if (self.data2g_background_monitor and
+            if tci:
+                input_selector = ""
+            elif (self.data2g_background_monitor and
                     self.backend_combo.currentData() == "experimental" and
                     self.input_device.currentData()):
                 input_selector = data2g_host_audio_selector_for_name(
@@ -6065,11 +6119,11 @@ class MainWindow(QMainWindow):
                 data2g_audio_device_selector(
                     self.data2g_output_device.currentData(),
                     self.data2g_output_device.currentText())
-                if self.data2g_output_device.count() else "")
-            if not input_selector and self.input_device.currentData():
+                if not tci and self.data2g_output_device.count() else "")
+            if not tci and not input_selector and self.input_device.currentData():
                 input_selector = data2g_host_audio_selector_for_name(
                     "input", self.input_device.currentData().description())
-            if not output_selector and self.output_device.currentData():
+            if not tci and not output_selector and self.output_device.currentData():
                 output_selector = data2g_host_audio_selector_for_name(
                     "output", self.output_device.currentData().description())
             args = local_host_arguments(
@@ -6081,7 +6135,11 @@ class MainWindow(QMainWindow):
                 rig_host=self.data2g_rig_host.text().strip(),
                 rig_port=self.data2g_rig_port.value(),
                 bandwidth_hz=int(self.data2g_host_bandwidth.currentData()),
+                tx_gain_db=self.data2g_tx_gain.value(),
                 record_dir=str(DATA / "data2g-recordings"))
+            if tci:
+                args.extend(("--pixelqso-tci-port", str(self.data2g_tci_port.value()),
+                             "--pixelqso-tci-receiver", str(self.data2g_tci_receiver.value())))
         except ValueError as exc:
             self.data2g_host_status.setText("Local host settings are invalid · " + str(exc))
             return False
@@ -6154,6 +6212,8 @@ class MainWindow(QMainWindow):
         if any(marker in log_text for marker in
                ("address already in use", "eaddrinuse", "winerror 10048", "errno 98")):
             return "A local Data2G port is already in use; choose free command/KISS ports in Station settings."
+        if "tci connection failed" in log_text:
+            return "TCI audio could not connect. Check that AetherSDR is running and its TCI server port is correct."
         missing_audio_device = any(
             marker in log_text for marker in
             ("no input device matching", "no output device matching"))
@@ -6204,7 +6264,8 @@ class MainWindow(QMainWindow):
             if rate < 8000 or rate > 192000:
                 continue
             self.rx_waterfall.sample_rate = rate
-            self.rx_waterfall.device_name = f"Data2G local input · {rate // 1000} kHz"
+            source = "AetherSDR TCI" if self._local_data2g_uses_tci() else "Data2G local input"
+            self.rx_waterfall.device_name = f"{source} · {rate // 1000} kHz"
             self.rx_waterfall.feed_float32(packet[4:])
 
     def _poll_local_data2g_host_log(self):
@@ -6234,17 +6295,18 @@ class MainWindow(QMainWindow):
                 lines.append(self.data2g_local_log_pending)
                 self.data2g_local_log_pending = ""
             self.data2g_host_log_timer.stop()
+        transport = "TCI" if self._local_data2g_uses_tci() else "rigctld"
         for line in lines:
             lowered = line.lower()
             if ("ptt on failed" in lowered or
                     ("to ptt on" in lowered and "rigctld answered" in lowered)):
                 warning = "on"
-                message = ("Managed Data2G host could not key the radio through rigctld. "
-                           "Check its rigctld connection and settings; see data2g-host.log.")
+                message = (f"Managed Data2G host could not key the radio through {transport}. "
+                           f"Check its {transport} connection and settings; see data2g-host.log.")
             elif ("ptt off failed" in lowered or
                   ("to ptt off" in lowered and "rigctld answered" in lowered)):
                 warning = "off"
-                message = ("Managed Data2G host could not confirm PTT release through rigctld. "
+                message = (f"Managed Data2G host could not confirm PTT release through {transport}. "
                            "Verify the radio is unkeyed; see data2g-host.log.")
             else:
                 continue
@@ -6281,6 +6343,7 @@ class MainWindow(QMainWindow):
                 "Apply or cancel the pending connection changes before connecting.")
             return
         if (self.data2g_host_source.currentData() == "local" and
+                not self._local_data2g_uses_tci() and
                 self.data2g_audio_config_errors):
             self.data2g_host_status.setText(self._data2g_audio_config_error_message())
             return
@@ -6495,9 +6558,11 @@ class MainWindow(QMainWindow):
         self.data2g_closing = False
         if self.on_air:
             self.on_air.emit("host_disconnected", {})
-        if self.stop_tx_btn.isVisible():
+        stopping_tx = self.data2g_stopping_tx
+        process = self.data2g_local_process if stopping_tx else None
+        if not stopping_tx and self.stop_tx_btn.isVisible():
             self._finish_data2g_transmission("Data2G host disconnected; any in-flight transmission status is unknown.")
-        if self.auto_armed:
+        if not stopping_tx and self.auto_armed:
             self.stop_auto_exchange(
                 "Automatic exchange stopped because the Data2G host disconnected.")
         self.data2g_session = None
@@ -6516,11 +6581,19 @@ class MainWindow(QMainWindow):
             if self.data2g_last_host_error else "Not connected")
         self._refresh_mode_options()
         self._stop_local_data2g_host()
+        if stopping_tx:
+            self.data2g_stopping_tx = False
+            if process is None or process.poll() != 0 or self.data2g_ptt_failed:
+                self._finish_data2g_transmission(
+                    "Data2G host stopped; PTT release is unconfirmed. Verify the radio is unkeyed.")
+            else:
+                self._finish_data2g_transmission(
+                    "Transmission stopped. Reconnecting the Data2G host for receive.")
         self._update_data2g_host_controls()
         self.refresh_tx_button()
         reconnect_after_settings = self.data2g_reconnect_after_settings
         self.data2g_reconnect_after_settings = False
-        if reconnect_after_settings and not self._closing:
+        if (reconnect_after_settings or stopping_tx) and not self._closing:
             QTimer.singleShot(0, self._connect_data2g_host)
         if (not self._closing and self.backend_combo.currentData() == "experimental"
                 and not self.data2g_ptt_failed and
@@ -6620,14 +6693,14 @@ class MainWindow(QMainWindow):
     def _data2g_session_error(self, session, message):
         # Startup failures are summarized after the connect worker completes,
         # where the managed-host log can provide a useful local audio/port hint.
-        if session is self.data2g_session and not self.data2g_connecting:
+        if session is self.data2g_session and not self.data2g_connecting and not self.data2g_stopping_tx:
             self._data2g_host_error(message)
 
     def _data2g_host_error(self, message):
         self.data2g_last_host_error = message
         self.exchange_log.append("Data2G host: " + message)
         self.data2g_host_status.setText("Host error: " + message)
-        if getattr(self, "data2g_tx_total", 0):
+        if getattr(self, "data2g_tx_total", 0) and not self.data2g_stopping_tx:
             in_flight = self.data2g_tx_waiting is not None
             detail = ("The in-flight frame may have transmitted; remaining frames were not sent. "
                       if in_flight else
@@ -7069,6 +7142,10 @@ class MainWindow(QMainWindow):
         self.settings.setValue("data2g/command_port", self.data2g_command_port.value())
         self.settings.setValue("data2g/kiss_port", self.data2g_kiss_port.value())
         self.settings.setValue("data2g/bandwidth_hz", int(self.data2g_host_bandwidth.currentData()))
+        self.settings.setValue("data2g/tx_gain_db", self.data2g_tx_gain.value())
+        self.settings.setValue("data2g/audio_transport", self.data2g_audio_transport.currentData())
+        self.settings.setValue("data2g/tci_port", self.data2g_tci_port.value())
+        self.settings.setValue("data2g/tci_receiver", self.data2g_tci_receiver.value())
         self.settings.setValue("station/audio_test_mode", self.audio_test_mode.isChecked())
         self.settings.setValue("options/show_experimental_modes", self.show_experimental_modes.isChecked())
         self.settings.setValue("transfer/repeats", self.repeat_count.value())
@@ -9116,9 +9193,32 @@ class MainWindow(QMainWindow):
             self.listen_indicator.setStyleSheet(status_label_style("positive"))
 
     def _stop_current_transmit(self):
+        if self.data2g_stopping_tx:
+            return
         if self.data2g_tx_total:
             stopped = DATA2G_ADAPTER.request_stop(
                 self.data2g_tx_frames, self.data2g_tx_waiting)
+            process = self.data2g_local_process
+            if (stopped.in_flight_may_complete and os.name == "posix" and
+                    process is not None and process.poll() is None):
+                try:
+                    # SIGTERM is handled by the managed host. It exits the
+                    # audio loop and releases CAT PTT before closing sockets.
+                    process.terminate()
+                except OSError as exc:
+                    self.exchange_log.append(f"Could not stop the local Data2G host: {exc}")
+                else:
+                    self.data2g_ack_timer.stop()
+                    self.data2g_tx_waiting = None
+                    self.data2g_stopping_tx = True
+                    self.data2g_closing = True
+                    self.stop_tx_btn.setEnabled(False)
+                    status = "Stopping the Data2G host and releasing PTT…"
+                    self.data2g_host_status.setText(status)
+                    self.rx_status.setText(status)
+                    self._update_data2g_host_controls()
+                    self.refresh_tx_button()
+                    return
             status = (f"Data2G queue stopped · {stopped.queued_cancelled} queued frames cancelled" +
                       (" · in-flight host transmission may still complete." if stopped.in_flight_may_complete
                        else " · no frame is in flight."))
