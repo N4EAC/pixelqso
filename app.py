@@ -2246,6 +2246,9 @@ class MainWindow(QMainWindow):
         self.data2g_local_log_offset = 0
         self.data2g_local_log_monitor_offset = 0
         self.data2g_local_log_pending = ""
+        self.data2g_local_tci = False
+        self.data2g_tci_rx_seen = False
+        self.data2g_tci_tx_confirmed = False
         self.data2g_ptt_warnings = set()
         self.data2g_ptt_failed = str(
             self.settings.value("data2g/ptt_failed", "false")).lower() in {
@@ -6171,6 +6174,9 @@ class MainWindow(QMainWindow):
             self.data2g_host_status.setText(f"Could not start local Data2G host: {exc}")
             return False
         self.data2g_local_log_monitor_offset = self.data2g_local_log_offset
+        self.data2g_local_tci = tci
+        self.data2g_tci_rx_seen = False
+        self.data2g_tci_tx_confirmed = False
         self.data2g_waterfall_timer.start()
         self.data2g_local_log_pending = ""
         self.data2g_ptt_warnings.clear()
@@ -6244,6 +6250,7 @@ class MainWindow(QMainWindow):
         else:
             self.data2g_host_log_timer.stop()
         self.data2g_local_process = None
+        self.data2g_local_tci = False
         if self.data2g_local_log:
             self.data2g_local_log.close()
             self.data2g_local_log = None
@@ -6295,9 +6302,19 @@ class MainWindow(QMainWindow):
                 lines.append(self.data2g_local_log_pending)
                 self.data2g_local_log_pending = ""
             self.data2g_host_log_timer.stop()
-        transport = "TCI" if self._local_data2g_uses_tci() else "rigctld"
+        transport = "TCI" if self.data2g_local_tci else "rigctld"
+        tci_status_changed = False
         for line in lines:
             lowered = line.lower()
+            if self.data2g_local_tci:
+                if lowered.endswith("tci rx audio received"):
+                    self.data2g_tci_rx_seen = True
+                    tci_status_changed = True
+                    continue
+                if lowered.endswith("tci tx audio sent and ptt cycle confirmed"):
+                    self.data2g_tci_tx_confirmed = True
+                    tci_status_changed = True
+                    continue
             if ("ptt on failed" in lowered or
                     ("to ptt on" in lowered and "rigctld answered" in lowered)):
                 warning = "on"
@@ -6323,6 +6340,8 @@ class MainWindow(QMainWindow):
                     self.stop_auto_exchange(
                         "Automatic exchange stopped after a managed-host PTT failure; "
                         "verify the radio is unkeyed before reconnecting.")
+        if tci_status_changed:
+            self._update_backend_ui()
 
     def _connect_data2g_host(self):
         if (self._closing or self.data2g_connecting or self.data2g_local_starting or
@@ -6508,8 +6527,7 @@ class MainWindow(QMainWindow):
             (f" · {capacity_rejected} below card capacity" if capacity_rejected else "") +
             (" · background receive monitor; Experimental retains CAT" if
              self.data2g_background_monitor and
-             self.backend_combo.currentData() == "experimental" else
-             " · host audio/PTT readiness unverified"))
+             self.backend_combo.currentData() == "experimental" else ""))
         self.data2g_host_connect.setText("Disconnect Data2G host")
         requested_mode = os.environ.get("PIXELQSO_DATA2G_MODE", "").strip()
         saved_mode = str(self.settings.value("transfer/data2g_mode", DEFAULT_MODE_KEY))
@@ -6545,8 +6563,7 @@ class MainWindow(QMainWindow):
             self._on_mode_selection_changed()
         elif not usable_modes:
             self.data2g_host_status.setText(
-                "Connected for receive · no mode fits this broadcast group's control and frame limits · "
-                "host audio/PTT readiness unverified")
+                "Connected for receive · no mode fits this broadcast group's control and frame limits")
         self.refresh_tx_button()
 
     def _data2g_host_closed(self, session):
@@ -6924,7 +6941,13 @@ class MainWindow(QMainWindow):
                 elif self.data2g_connecting or self.data2g_local_starting:
                     connection_text = "Connecting to Data2G host…"
                 elif DATA2G_ADAPTER.is_connected(self.data2g_session):
-                    connection_text = "Data2G connected · audio/PTT readiness unverified"
+                    connection_text = "Data2G connected"
+                    if self.data2g_local_tci:
+                        connection_text = "Data2G · TCI connected"
+                        if self.data2g_tci_rx_seen:
+                            connection_text += " · RX audio received"
+                        if self.data2g_tci_tx_confirmed:
+                            connection_text += " · TX audio sent · PTT confirmed"
                 else:
                     connection_text = "Data2G not connected"
                 self.rig_status.setText(connection_text)

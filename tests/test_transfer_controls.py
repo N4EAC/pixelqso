@@ -71,9 +71,7 @@ class TransferControlTests(unittest.TestCase):
                 window.data2g_session = Mock()
                 with patch.object(pixelqso.DATA2G_ADAPTER, "is_connected", return_value=True):
                     window._update_backend_ui()
-                    self.assertEqual(
-                        window.rig_status.text(),
-                        "Data2G connected · audio/PTT readiness unverified")
+                    self.assertEqual(window.rig_status.text(), "Data2G connected")
                     self.assertEqual(window.listen_indicator.text(), "● WAITING FOR FRAMES")
                     self.assertEqual(window.station_button.text(), "Station settings")
                     window.refresh_tx_button()
@@ -96,6 +94,38 @@ class TransferControlTests(unittest.TestCase):
             finally:
                 window.close()
                 pixelqso.DATA = old_data
+
+    def test_tci_banner_reports_observed_audio_and_ptt(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(
+                os.environ, {"PIXELQSO_DATA_DIR": folder}), patch("app.QTimer.singleShot"):
+            window = pixelqso.MainWindow()
+            window.data2g_session = Mock()
+            window.data2g_local_process = Mock()
+            window.data2g_local_process.poll.return_value = None
+            window.data2g_local_tci = True
+            log = Path(folder, "data2g-host.log")
+            try:
+                with patch.object(pixelqso.DATA2G_ADAPTER, "is_connected", return_value=True):
+                    window._update_backend_ui()
+                    self.assertEqual(window.rig_status.text(), "Data2G · TCI connected")
+                    with log.open("w") as host_log:
+                        host_log.write("INFO TCI RX audio received\n")
+                        host_log.flush()
+                        window._poll_local_data2g_host_log()
+                        self.assertEqual(window.rig_status.text(),
+                                         "Data2G · TCI connected · RX audio received")
+                        host_log.write("INFO TCI TX audio sent and PTT cycle confirmed\n")
+                        host_log.flush()
+                        window._poll_local_data2g_host_log()
+                    self.assertEqual(window.rig_status.text(),
+                                     "Data2G · TCI connected · RX audio received · TX audio sent · PTT confirmed")
+                    window.data2g_ptt_failed = True
+                    window._update_backend_ui()
+                    self.assertIn("PTT fault", window.rig_status.text())
+            finally:
+                window.data2g_session = None
+                window.data2g_local_process = None
+                window.close()
 
     def test_settings_and_about_are_available_from_every_destination(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(

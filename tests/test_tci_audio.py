@@ -65,7 +65,9 @@ def test_tci_waits_for_chrono_and_releases_its_ptt():
             client.tx.extend(pcm)
         ws.incoming.put(frame(0, TX_CHRONO, 4))
         assert ws.audio.get(timeout=1) == frame(0, TX_AUDIO, 4, pcm)
+        assert not client.tx_cycle_confirmed
         client.release()
+        assert client.tx_cycle_confirmed
         assert not client.requested
         assert ws.commands[-2:] == ["trx:0,true,tci;", "trx:0,false;"]
     finally:
@@ -80,8 +82,10 @@ def test_tci_filters_receivers_and_refuses_voice_mode_ptt():
         pcm = np.array([.2, .2, -.2, -.2], dtype="<f4").tobytes()
         client._audio_message(frame(1, RX_AUDIO, 4, pcm))
         assert not client.rx
+        assert not client.rx_audio_seen
         client._audio_message(frame(0, RX_AUDIO, 4, pcm))
         assert client.rx == pcm
+        assert client.rx_audio_seen
         with pytest.raises(RuntimeError, match="DIGU or DIGL"):
             client.ptt(True)
         client.release()

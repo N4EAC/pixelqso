@@ -25,6 +25,9 @@ class TciAudio:
         self.condition = threading.Condition()
         self.rx = bytearray()
         self.tx = bytearray()
+        self.rx_audio_seen = False
+        self.tx_audio_sent = False
+        self.tx_cycle_confirmed = False
         self.fault = None
         self.closing = False
         self.requested = False
@@ -113,6 +116,9 @@ class TciAudio:
             with self.condition:
                 if not self.requested:
                     self.rx.extend(message[HEADER.size:HEADER.size + byte_count])
+                    if not self.rx_audio_seen:
+                        self.rx_audio_seen = True
+                        log.info("TCI RX audio received")
                     excess = len(self.rx) - SAMPLE_RATE * FRAME_BYTES // 3
                     if excess > 0:
                         del self.rx[:excess]
@@ -128,6 +134,8 @@ class TciAudio:
                 self.ws.send_binary(
                     HEADER.pack(receiver, rate, FLOAT32, 0, 0, samples, TX_AUDIO, CHANNELS, *([0] * 8))
                     + audio.ljust(byte_count, b"\0"))
+                if not self.tx_audio_sent and self.trx is True and any(audio):
+                    self.tx_audio_sent = True
                 self.last_chrono = time.monotonic()
                 self.condition.notify_all()
 
@@ -147,6 +155,7 @@ class TciAudio:
                 self.requested = True
                 self.unkeying = False
                 self.last_chrono = None
+                self.tx_audio_sent = False
                 self.rx.clear()
                 self.tx.clear()
             else:
@@ -162,6 +171,9 @@ class TciAudio:
                     if not on and self.trx_updates > updates and self.trx is False:
                         self.requested = False
                         self.last_chrono = None
+                        if self.tx_audio_sent and not self.tx_cycle_confirmed:
+                            self.tx_cycle_confirmed = True
+                            log.info("TCI TX audio sent and PTT cycle confirmed")
                         return True
                     if on and self.stop.is_set():
                         break
