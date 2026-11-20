@@ -27,7 +27,7 @@ from PySide6.QtCore import Qt, QRect, QSize, QObject, QTimer, QEvent, QRunnable,
 from PySide6.QtCore import QEventLoop, QMicrophonePermission
 from PySide6.QtGui import QAction, QColor, QPainter, QPen, QImage, QPixmap, QFont, QIcon, QKeySequence, QShortcut, QDrag, QStandardItem, QStandardItemModel
 from PySide6.QtNetwork import QTcpSocket, QUdpSocket, QHostAddress
-from PySide6.QtMultimedia import QAudio, QAudioDevice, QAudioFormat, QAudioSink, QAudioSource, QMediaDevices
+from PySide6.QtMultimedia import QAudio, QAudioDevice, QAudioFormat, QAudioSink, QAudioSource, QMediaDevices, QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QListWidget, QListWidgetItem,
     QFormLayout, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QInputDialog,
     QMessageBox, QPushButton, QSpinBox, QTabWidget, QTextEdit, QDialog,
@@ -305,6 +305,8 @@ class RigctlClient(QObject):
 
 class DecodeSignals(QObject):
     finished = Signal(object)
+    audio_ready = Signal(object)
+    file_finished = Signal(object)
     preview = Signal(object)
     progress = Signal(object)
 
@@ -694,7 +696,7 @@ def local_adapter_for_mode(mode):
 class DecodeWorker(QRunnable):
     def __init__(self, path: Path, state_path: Path, profile="auto", mode="standard",
                  audio_placement="near_carrier", preferred_mode=None,
-                 include_experimental=False):
+                 include_experimental=False, monitor_audio=False):
         super().__init__()
         self.path = path
         self.state_path = state_path
@@ -703,40 +705,52 @@ class DecodeWorker(QRunnable):
         self.audio_placement = audio_placement
         self.preferred_mode = preferred_mode
         self.include_experimental = include_experimental
+        self.monitor_audio = monitor_audio
+        self.monitor_token = 0
         self.signals = DecodeSignals()
+
+    def _finish(self, result):
+        if self.monitor_audio:
+            self.signals.file_finished.emit((self.monitor_token, result))
+        else:
+            self.signals.finished.emit(result)
 
     def run(self):
         try:
+            if self.monitor_audio:
+                audio, sr = modem.read_wav(self.path)
+                self.signals.audio_ready.emit((self.path, self.monitor_token, (audio, sr)))
             if self.mode == LEGACY_MODE_KEY:
                 outcome = local_adapter_for_mode(self.mode).decode_legacy_wav(
                     self.path, self.state_path, self.profile)
-                self.signals.finished.emit((str(self.path), outcome.report, outcome.failure))
+                self._finish((str(self.path), outcome.report, outcome.failure))
                 return
-            audio, sr = modem.read_wav(self.path)
+            if not self.monitor_audio:
+                audio, sr = modem.read_wav(self.path)
             if self.mode == "auto":
                 outcome = decode_all_card_backends(audio, sr, self.audio_placement,
                                                    self.preferred_mode, self.include_experimental)
                 if (outcome.failure and
                         outcome.failure.kind is DecodeFailureKind.NO_MATCH):
-                    self.signals.finished.emit((str(self.path), None, outcome.failure))
+                    self._finish((str(self.path), None, outcome.failure))
                     return
                 if outcome.failure:
-                    self.signals.finished.emit((str(self.path), None, outcome.failure))
+                    self._finish((str(self.path), None, outcome.failure))
                     return
                 if outcome.report.get("receive_activity"):
                     raise ValueError("Synchronization found, but the capture has no decoded card data yet")
-                self.signals.finished.emit((str(self.path), outcome.report, None))
+                self._finish((str(self.path), outcome.report, None))
                 return
             if is_card_backend(self.mode):
                 outcome = local_adapter_for_mode(self.mode).decode_capture(
                     get_backend(self.mode, self.audio_placement), audio, sr)
                 if outcome.report and outcome.report.get("receive_activity"):
                     raise ValueError("Synchronization found, but the capture has no decoded card data yet")
-                self.signals.finished.emit((str(self.path), outcome.report, outcome.failure))
+                self._finish((str(self.path), outcome.report, outcome.failure))
                 return
             raise ValueError(f"No decoder is registered for mode {self.mode!r}")
         except Exception as exc:
-            self.signals.finished.emit((str(self.path), None, str(exc)))
+            self._finish((str(self.path), None, str(exc)))
 
 
 class LiveDecodeWorker(QRunnable):
@@ -2475,6 +2489,12 @@ class MainWindow(QMainWindow):
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 continue
         self.decode_jobs = 0
+        self.file_playback_token = 0
+        self.file_playback_active = False
+        self.file_audio_loaded = False
+        self.file_audio_samples = np.empty(0, dtype=np.float32)
+        self.file_audio_rate = 48000
+        self.file_audio_cursor = 0
         self.tx_audio = None
         self.tx_device = None
         self.tx_bytes = b""
@@ -5085,7 +5105,9 @@ class MainWindow(QMainWindow):
         self.call_cq_button.setCheckable(True)
         self.call_cq_button.toggled.connect(self._toggle_call_cq)
         self.cq_interval = QSpinBox(); self.cq_interval.setRange(1, 3600)
-        self.cq_interval.setValue(int(self.settings.value("transfer/cq_interval_seconds", 5)))
+        self.cq_interval.setValue(int(self.settings.value("transfer/cq_interval_seconds", 120)))
+        self.cq_interval.setStyleSheet(
+            "QLineEdit { border: none; padding: 0 6px; background: transparent; }")
         self.cq_interval.setSuffix(" s")
         self.cq_interval.setAccessibleName("CQ repeat interval")
         self.cq_interval.setAccessibleDescription(
@@ -5129,15 +5151,55 @@ class MainWindow(QMainWindow):
         self._set_advanced_controls(
             self.settings.value("ui/advanced_controls", False, type=bool))
 
-        wav_button = QPushButton("Decode audio file…"); wav_button.clicked.connect(self.decode_wav)
+        self.decode_file_button = QPushButton("Decode audio file…")
+        self.decode_file_button.clicked.connect(self.decode_wav)
+        self.file_play_led = QLabel("● PLAY")
+        self.file_play_led.setAccessibleName("Audio file playback")
+        self.file_play_led.setStyleSheet(status_label_style("muted"))
+        self.file_play_led.setMinimumWidth(self.file_play_led.sizeHint().width())
+        self.file_playback_status = QLabel("")
+        self.file_playback_status.setWordWrap(True)
+        self.file_stop_button = QPushButton("Stop audio file")
+        self.file_stop_button.setEnabled(False)
+        self.file_stop_button.clicked.connect(lambda: self.stop_file_playback())
+        self.file_output_device = QComboBox()
+        self.file_output_device.setAccessibleName("Computer playback output")
+        self.file_output_device.addItem("System default output", None)
+        saved_output = str(self.settings.value("audio/file_playback_output", ""))
+        for device in QMediaDevices.audioOutputs():
+            self.file_output_device.addItem(device.description(), device)
+            if bytes(device.id()).hex() == saved_output:
+                self.file_output_device.setCurrentIndex(self.file_output_device.count() - 1)
+        self.file_output_device.currentIndexChanged.connect(self._file_output_changed)
+        self.file_audio_output = QAudioOutput(self)
+        self.file_player = QMediaPlayer(self)
+        self.file_player.setAudioOutput(self.file_audio_output)
+        self.file_player.mediaStatusChanged.connect(self._file_media_status)
+        self.file_player.errorOccurred.connect(self._file_playback_error)
+        self.file_playback_timer = QTimer(self)
+        self.file_playback_timer.setInterval(50)
+        self.file_playback_timer.timeout.connect(self._update_file_playback)
+        self.file_led_timer = QTimer(self)
+        self.file_led_timer.setInterval(650)
+        self.file_led_timer.timeout.connect(self._blink_file_play_led)
+        self.file_led_lit = False
         receive_group = QGroupBox("Receive")
         self.receive_group = receive_group
-        receive_layout = QHBoxLayout(receive_group)
+        receive_layout = QVBoxLayout(receive_group)
         self.receive_status_hint = QLabel()
         self.receive_status_hint.setWordWrap(True)
         self.receive_status_hint.setAccessibleDescription("Explains connection requirements and what receive activity has or has not confirmed.")
-        receive_layout.addWidget(self.receive_status_hint, 1)
-        receive_layout.addWidget(wav_button)
+        receive_layout.addWidget(self.receive_status_hint)
+        file_controls = QHBoxLayout()
+        file_controls.addWidget(self.decode_file_button)
+        file_controls.addWidget(self.file_play_led)
+        file_controls.addWidget(self.file_stop_button)
+        file_controls.addStretch(1)
+        receive_layout.addLayout(file_controls)
+        output_form = QFormLayout()
+        output_form.addRow("Computer playback output", self.file_output_device)
+        receive_layout.addLayout(output_form)
+        receive_layout.addWidget(self.file_playback_status)
 
         left_panel = QVBoxLayout(); left_panel.setContentsMargins(0, 0, 0, 0); left_panel.setSpacing(12)
         self.outgoing_art = QLabel(); self.outgoing_art.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -6270,6 +6332,8 @@ class MainWindow(QMainWindow):
             rate = int.from_bytes(packet[:4], "big")
             if rate < 8000 or rate > 192000:
                 continue
+            if self.file_playback_active:
+                continue
             self.rx_waterfall.sample_rate = rate
             source = "AetherSDR TCI" if self._local_data2g_uses_tci() else "Data2G local input"
             self.rx_waterfall.device_name = f"{source} · {rate // 1000} kHz"
@@ -7019,11 +7083,11 @@ class MainWindow(QMainWindow):
             local_data2g_audio = bool(
                 selected_data2g and self.data2g_local_process is not None and
                 self.data2g_local_process.poll() is None)
-            show_spectrum = capabilities.spectrum or local_data2g_audio
+            show_spectrum = capabilities.spectrum or local_data2g_audio or self.file_playback_active
             self.rx_visual_stack.setVisible(show_spectrum)
             if show_spectrum:
                 self.rx_visual_stack.setCurrentWidget(self.rx_waterfall)
-                if local_data2g_audio and not self.data2g_waterfall_timer.isActive():
+                if local_data2g_audio and not self.file_playback_active and not self.data2g_waterfall_timer.isActive():
                     self.rx_waterfall.reset("Data2G local input")
         if hasattr(self, "cat_settings_group"):
             self.cat_settings_group.setVisible(not selected_data2g)
@@ -9859,16 +9923,111 @@ class MainWindow(QMainWindow):
     def decode_wav(self):
         name, _ = QFileDialog.getOpenFileName(self, "Open received WAV", str(DATA), "WAV audio (*.wav)")
         if not name: return
-        self.start_decode(Path(name))
+        self.stop_file_playback()
+        self.file_playback_active = True
+        self.file_audio_loaded = False
+        self.file_stop_button.setEnabled(True)
+        self.file_output_device.setEnabled(False)
+        self.decode_file_button.setEnabled(False)
+        self.file_playback_status.setText(f"Loading {Path(name).name}…")
+        self.start_decode(Path(name), monitor_audio=True)
 
-    def start_decode(self, path, profile="auto"):
+    def _file_output_changed(self):
+        device = self.file_output_device.currentData()
+        self.settings.setValue("audio/file_playback_output",
+                               bytes(device.id()).hex() if device is not None else "")
+
+    def _start_file_playback(self, payload):
+        path, token, result = payload
+        if token != self.file_playback_token or self._closing:
+            return
+        self.file_audio_samples, self.file_audio_rate = result
+        self.file_audio_loaded = True
+        self.file_audio_cursor = 0
+        device = self.file_output_device.currentData()
+        self.file_audio_output.setDevice(
+            device if device is not None else QMediaDevices.defaultAudioOutput())
+        self.rx_waterfall.reset(f"Audio file · {path.name}", self.file_audio_rate)
+        self.rx_visual_stack.setCurrentWidget(self.rx_waterfall)
+        self.rx_visual_stack.show()
+        self.file_player.setSource(QUrl.fromLocalFile(str(path.resolve())))
+        self.file_player.play()
+        if not self.file_playback_active:
+            return
+        self.file_playback_timer.start()
+        self.file_led_timer.start()
+        self._blink_file_play_led()
+        self._update_file_playback()
+
+    def _blink_file_play_led(self):
+        self.file_led_lit = not self.file_led_lit
+        self.file_play_led.setStyleSheet(
+            "color:#ff4949;font-weight:700" if self.file_led_lit else
+            "color:#692d31;font-weight:700")
+
+    def _update_file_playback(self):
+        if not self.file_playback_active:
+            return
+        position = self.file_player.position()
+        cursor = min(len(self.file_audio_samples), round(position * self.file_audio_rate / 1000))
+        if cursor > self.file_audio_cursor:
+            # Feed short blocks to preserve time progression in the waterfall.
+            block = max(1, self.file_audio_rate // 20)
+            for offset in range(self.file_audio_cursor, cursor, block):
+                self.rx_waterfall.feed_pcm16(pcm16_audio_bytes(
+                    self.file_audio_samples[offset:min(offset + block, cursor)]))
+            self.file_audio_cursor = cursor
+        duration = len(self.file_audio_samples) / self.file_audio_rate
+        self.file_playback_status.setText(
+            f"Playing {self.file_player.source().fileName()} · {position / 1000:.1f} / {duration:.1f} s")
+
+    def _file_media_status(self, status):
+        if self.file_playback_active and status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._update_file_playback()
+            self.stop_file_playback("Audio file playback complete", cancel_decode=False)
+
+    def _file_playback_error(self, _error, message):
+        if self.file_playback_active:
+            self.stop_file_playback("Audio file playback failed · " + message, cancel_decode=False)
+
+    def stop_file_playback(self, message="Audio file stopped", *, cancel_decode=True):
+        if cancel_decode:
+            self.file_playback_token += 1
+        self.file_playback_active = False
+        self.file_playback_timer.stop()
+        self.file_led_timer.stop()
+        self.file_player.stop()
+        self.file_player.setSource(QUrl())
+        self.file_audio_samples = np.empty(0, dtype=np.float32)
+        self.file_play_led.setStyleSheet(status_label_style("muted"))
+        self.file_stop_button.setEnabled(False)
+        self.file_output_device.setEnabled(True)
+        self.decode_file_button.setEnabled(True)
+        self.file_playback_status.setText(message)
+        self._update_backend_ui()
+
+    def start_decode(self, path, profile="auto", monitor_audio=False):
         self.rx_status.setText(f"Decoding {path.name} in the background…")
         self.decode_jobs += 1
         worker = DecodeWorker(path, Path(self.combine.text()), profile, self.receive_mode(),
                               self.selected_audio_placement(), self.selected_mode(),
-                              self.show_experimental_modes.isChecked())
-        worker.signals.finished.connect(self.decode_finished)
+                              self.show_experimental_modes.isChecked(), monitor_audio=monitor_audio)
+        if monitor_audio:
+            worker.monitor_token = self.file_playback_token
+            worker.signals.audio_ready.connect(self._start_file_playback)
+            worker.signals.file_finished.connect(self._file_decode_finished)
+        else:
+            worker.signals.finished.connect(self.decode_finished)
         self.decode_pool.start(worker)
+
+    def _file_decode_finished(self, payload):
+        token, result = payload
+        if token != self.file_playback_token or self._closing:
+            self.decode_jobs = max(0, self.decode_jobs - 1)
+            return
+        if result[2] and not self.file_audio_loaded:
+            self.stop_file_playback("Could not load audio file")
+        self.decode_finished(result)
 
     def decode_finished(self, result):
         self.decode_jobs = max(0, self.decode_jobs - 1)
@@ -10130,7 +10289,7 @@ class MainWindow(QMainWindow):
                         self.test_rx_expected += 1
                     else:
                         self.test_rx_expected = next_sequence
-        if len(self.rx_bytes) > previous_samples:
+        if len(self.rx_bytes) > previous_samples and not self.file_playback_active:
             self.rx_waterfall.feed_pcm16(bytes(self.rx_bytes[previous_samples:]))
         if self.on_air and len(self.rx_bytes) > previous_samples:
             self.on_air_rx_buffer.extend(self.rx_bytes[previous_samples:])
@@ -10904,6 +11063,7 @@ class MainWindow(QMainWindow):
         self.beacon_status_timer.stop()
         self.receive_activity_timeout.stop()
         self._closing = True
+        self.stop_file_playback()
         self.tx_timer.stop()
         if self.tx_audio:
             self.tx_audio.stop()
